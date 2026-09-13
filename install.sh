@@ -14,17 +14,12 @@
 # Environment variables (all optional)
 #   ADVERTISE_ADDR   Manual address override if auto-detection fails.
 #   MRE_HTTP_PORT    Host port for HTTP (default: 80). Takes precedence over
-#   MRE_HTTPS_PORT   .env, as compose does. Only a fresh 'install' writes it
-#                    there; every other run honours it for that run only.
 #   MRE_SKIP_BACKUP  Set to 1 to skip the automatic pre-change backup.
-#   MRE_SRC_URL      Where the compose file, Caddyfile and .env template are
+#   MRE_SRC_URL      Where the compose file and .env template are
 #                    fetched from. That compose file then runs as root, so point
 #                    this only at a host you trust.
 #
 # MRE_VERSION is read from .env only; edit .env to change the image tag.
-#
-# Note: with non-default host ports, Let's Encrypt cannot reach Caddy on
-# 80/443 from the internet, so automatic HTTPS for domains will not work.
 #
 # Behavior notes
 #   - 'update' owns every change to an installation. 'install' only installs:
@@ -32,7 +27,7 @@
 #     starts the app if it is not running, so it is safe to re-run at any time.
 #   - 'install' reuses images already present locally; only 'update' re-pulls
 #     the tag in .env (MRE_VERSION).
-#   - 'update' also re-downloads docker-compose.yml, the Caddyfile and the
+#   - 'update' also re-downloads docker-compose.yml and the
 #     .env.domain template from MRE_SRC_URL, so new images do not run under the
 #     previous release's topology. Replaced copies are kept as
 #     'backup/<timestamp>-<filename>'. In a git checkout 'git pull' owns those
@@ -59,7 +54,6 @@ HEALTH_WAIT_SECONDS=180
 # One stamp per run, shared by every file it writes into backup/.
 RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RESOLVED_HTTP_PORT=""
-RESOLVED_HTTPS_PORT=""
 # Set by probe_stack_files: one 'tmp|dest|backup' triple per file to install.
 declare -a STACK_FILE_UPDATES=()
 
@@ -135,12 +129,8 @@ ${C_BOLD}Options${C_OFF}
 ${C_BOLD}Environment${C_OFF} (all optional)
   ADVERTISE_ADDR     Address override when auto-detection fails.
   MRE_HTTP_PORT      Host port for HTTP (default: 80).
-  MRE_HTTPS_PORT     Host port for HTTPS (default: 443).
-                     Both take precedence over .env, as compose does. A fresh
-                     'install' writes them there; every other run honours them
-                     for that run only.
   MRE_SKIP_BACKUP    Set to 1 to skip the automatic pre-change backup.
-  MRE_SRC_URL        Where docker-compose.yml, the Caddyfile and .env.domain
+  MRE_SRC_URL        Where docker-compose.yml and .env.domain
                      are fetched from. That compose file runs as root, so
                      point this only at a host you trust.
   MRE_VERSION        Read from .env only; edit .env to change the image tag.
@@ -160,8 +150,6 @@ ${C_BOLD}Notes${C_OFF}
     on demand, or to restore, use ./mre.sh.
   - 'update' never rewrites .env: keys a new release adds must be copied from
     .env.domain by hand.
-  - With non-default ports, Let's Encrypt cannot reach Caddy on 80/443, so
-    automatic HTTPS for a domain will not work.
 EOF
 }
 
@@ -404,12 +392,12 @@ port_in_use() {
 
 check_ports() {
   local p
-  for p in "$RESOLVED_HTTP_PORT" "$RESOLVED_HTTPS_PORT"; do
+  for p in "$RESOLVED_HTTP_PORT"; do
     if port_in_use "$p"; then
-      die "Port $p is already in use. Stop the conflicting service, or choose other ports via MRE_HTTP_PORT/MRE_HTTPS_PORT."
+      die "Port $p is already in use. Stop the conflicting service, or choose other ports via MRE_HTTP_PORT."
     fi
   done
-  ok "Ports $RESOLVED_HTTP_PORT and $RESOLVED_HTTPS_PORT are available"
+  ok "Port $RESOLVED_HTTP_PORT is available"
 }
 
 is_valid_port() {
@@ -425,10 +413,9 @@ is_valid_port() {
 resolve_ports() {
   local mode="$1"
   local key candidate from_env from_file default
-  for key in MRE_HTTP_PORT MRE_HTTPS_PORT; do
+  for key in MRE_HTTP_PORT; do
     case "$key" in
       MRE_HTTP_PORT)  default=80 ;;
-      MRE_HTTPS_PORT) default=443 ;;
     esac
     from_env="${!key:-}"
     from_file="${ENV_CURRENT[$key]:-}"
@@ -446,11 +433,7 @@ resolve_ports() {
     ENV_CURRENT["$key"]="$candidate"
   done
   RESOLVED_HTTP_PORT="${ENV_CURRENT[MRE_HTTP_PORT]}"
-  RESOLVED_HTTPS_PORT="${ENV_CURRENT[MRE_HTTPS_PORT]}"
-  if [ "$RESOLVED_HTTP_PORT" = "$RESOLVED_HTTPS_PORT" ]; then
-    die "MRE_HTTP_PORT and MRE_HTTPS_PORT must differ (both are $RESOLVED_HTTP_PORT)."
-  fi
-  ok "HTTP port: $RESOLVED_HTTP_PORT / HTTPS port: $RESOLVED_HTTPS_PORT"
+  ok "HTTP port: $RESOLVED_HTTP_PORT"
 }
 
 # INSTALL_DIR defaults to $PWD, so 'curl … | bash' in the wrong directory would
@@ -484,21 +467,21 @@ validate_install_dir() {
 }
 
 require_root() {
-  [ "$RESOLVED_HTTP_PORT" -lt 1024 ] || [ "$RESOLVED_HTTPS_PORT" -lt 1024 ] || return 0
+  [[ "$RESOLVED_HTTP_PORT" -lt 1024 ]] || return 0
   [ "$(id -u)" -eq 0 ] && return 0
 
-  info "Ports $RESOLVED_HTTP_PORT/$RESOLVED_HTTPS_PORT are below 1024 and need root to bind. Using sudo for the remaining docker/compose steps; you may be prompted for your password."
+  info "Ports $RESOLVED_HTTP_PORT is below 1024 and need root to bind. Using sudo for the remaining docker/compose steps; you may be prompted for your password."
 
   local resume_cmd="curl -sSL ${MRE_SRC_URL}/install.sh | sudo bash -s -- $SUBCOMMAND"
   [ "$INSTALL_DIR" = "$PWD" ] || resume_cmd="$resume_cmd --dir \"$INSTALL_DIR\""
 
   [ -r /dev/tty ] || die "No terminal available to prompt for sudo. Re-run with:
     $resume_cmd
-    or pick unprivileged ports via MRE_HTTP_PORT/MRE_HTTPS_PORT."
+    or pick unprivileged ports via MRE_HTTP_PORT"
   require_cmd sudo
   sudo -v || die "sudo authentication failed. Re-run with:
     $resume_cmd
-    or pick unprivileged ports via MRE_HTTP_PORT/MRE_HTTPS_PORT."
+    or pick unprivileged ports via MRE_HTTP_PORT"
   ROOT_CMD="sudo"
 }
 
@@ -521,24 +504,6 @@ is_ipv4()  { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 is_ipv6()  { [[ "$1" =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]]; }
 is_fqdn()  { [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]; }
 
-fetch_public_ip() {
-  local url
-  for url in \
-    https://ifconfig.io \
-    https://icanhazip.com \
-    https://ipecho.net/plain \
-    https://checkip.amazonaws.com
-  do
-    local ip
-    ip="$(curl -fsSL --max-time 3 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
-    if [ -n "$ip" ] && { is_ipv4 "$ip" || is_ipv6 "$ip"; }; then
-      printf '%s' "$ip"
-      return 0
-    fi
-  done
-  return 1
-}
-
 fetch_lan_ip() {
   local ip=""
   if command -v ip >/dev/null 2>&1; then
@@ -557,10 +522,7 @@ detect_address() {
   local input="${ADVERTISE_ADDR:-}"
   if [ -z "$input" ]; then
     info "Detecting this server's address..."
-    input="$(fetch_public_ip || true)"
-    if [ -z "$input" ]; then
-      input="$(fetch_lan_ip || true)"
-    fi
+    input="$(fetch_lan_ip || true)"
   fi
 
   if [ -z "$input" ] || ! { is_fqdn "$input" || is_ipv4 "$input" || is_ipv6 "$input"; }; then
@@ -580,7 +542,7 @@ detect_address() {
   if is_ipv4 "$input" || is_ipv6 "$input"; then
     info "Detected IP: $RESOLVED_ADDR"
   else
-    info "Detected FQDN: $RESOLVED_ADDR (HTTPS will be available after domain setup)"
+    info "Detected FQDN: $RESOLVED_ADDR"
   fi
   ok "Server address: $RESOLVED_ADDR"
 }
@@ -644,23 +606,16 @@ resolve_compose_files() {
     return
   fi
   if [ -f "docker-compose.yml" ]; then
-    if [ ! -f "Caddyfile" ]; then
-      info "Fetching missing Caddyfile from $MRE_SRC_URL..."
-      download_file "$MRE_SRC_URL/docker/Caddyfile" "Caddyfile" \
-        || die "Failed to download Caddyfile from $MRE_SRC_URL"
-    fi
     COMPOSE_ARGS=(-f "docker-compose.yml")
     ok "Using local compose file: docker-compose.yml"
     return
   fi
-  info "Fetching docker-compose.yml and Caddyfile from $MRE_SRC_URL..."
+  info "Fetching docker-compose.yml from $MRE_SRC_URL..."
   mkdir -p docker
   download_file "$MRE_SRC_URL/docker/docker-compose.yml" "docker/docker-compose.yml" \
     || die "Failed to download docker-compose.yml from $MRE_SRC_URL"
-  download_file "$MRE_SRC_URL/docker/Caddyfile" "docker/Caddyfile" \
-    || die "Failed to download Caddyfile from $MRE_SRC_URL"
   COMPOSE_ARGS=(-f "docker/docker-compose.yml")
-  ok "Downloaded docker/docker-compose.yml and docker/Caddyfile"
+  ok "Downloaded docker/docker-compose.yml"
 }
 
 ensure_env_domain_template() {
@@ -700,17 +655,12 @@ probe_stack_files() {
   cd "$INSTALL_DIR"
   STACK_FILE_UPDATES=()
   if [ -d ".git" ]; then
-    info "Git checkout: the compose file, Caddyfile and .env.domain are left to git."
+    info "Git checkout: the compose file, and .env.domain are left to git."
     return 0
   fi
 
   local compose_file="${COMPOSE_ARGS[1]:-}"
   [ -n "$compose_file" ] || die "No compose file resolved; cannot refresh the stack files."
-  local caddy_file
-  case "$compose_file" in
-    docker/*) caddy_file="docker/Caddyfile" ;;
-    *)        caddy_file="Caddyfile" ;;
-  esac
 
   # .env.domain loses its leading dot so the copy is not a hidden file.
   local bk="${INSTALL_DIR}/backup/${RUN_STAMP}"
@@ -720,11 +670,6 @@ probe_stack_files() {
   tmp="$(probe_file "$MRE_SRC_URL/docker/docker-compose.yml" "$compose_file")" \
     || die "Failed to download docker-compose.yml from $MRE_SRC_URL. Nothing has been changed."
   [ -n "$tmp" ] && STACK_FILE_UPDATES+=("${tmp}|${compose_file}|${bk}-docker-compose.yml")
-  tmp="$(probe_file "$MRE_SRC_URL/docker/Caddyfile" "$caddy_file")" \
-    || { discard_stack_files
-         die "Failed to download the Caddyfile from $MRE_SRC_URL. Nothing has been changed.
-    Re-run './install.sh update' once the source is reachable."; }
-  [ -n "$tmp" ] && STACK_FILE_UPDATES+=("${tmp}|${caddy_file}|${bk}-Caddyfile")
   # Template only, read by 'install' and by operators: never fatal.
   tmp="$(probe_file "$MRE_SRC_URL/.env.domain" ".env.domain")" \
     || { warn "Could not check the .env.domain template (not fatal)."; tmp=""; }
@@ -839,7 +784,7 @@ generate_secrets() {
 # The canonical key order we emit. Keys missing from this list go at the end.
 ENV_KEY_ORDER=(
   MRE_VERSION
-  MRE_HTTP_PORT MRE_HTTPS_PORT
+  MRE_HTTP_PORT
   MONGO_URL
   ACCESS_TOKEN_SECRET REFRESH_TOKEN_SECRET RESET_TOKEN_SECRET
   CIPHER_KEY CIPHER_IV_KEY
